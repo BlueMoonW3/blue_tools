@@ -45,7 +45,7 @@ async def check_shadowban(username):
     timeout = 15000  # 15 seconds max timeout for each page load
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.firefox.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
 
