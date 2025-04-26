@@ -45,9 +45,10 @@ async def check_shadowban(username):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36"
     }
-    timeout = aiohttp.ClientTimeout(total=10)  # 10-second timeout for requests
+    timeout = aiohttp.ClientTimeout(total=10)
+    connector = aiohttp.TCPConnector(limit=None, force_close=True, ssl=False)
 
-    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout, connector=connector) as session:
         # 1. Check if user exists
         profile_url = f"{base_url}/{username}"
         async with session.get(profile_url) as response:
