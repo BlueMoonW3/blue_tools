@@ -1,19 +1,18 @@
 import discord
 from discord.ext import commands
-import httpx
-from bs4 import BeautifulSoup
 import os
-import random
+import asyncio
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright
 
-# Load environment variables (for local testing)
+# Load environment variables
 load_dotenv()
 
 # Initialize bot
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Bot ready event
+# Bot ready
 @bot.event
 async def on_ready():
     await bot.tree.sync()
@@ -29,118 +28,90 @@ async def shadowban(interaction: discord.Interaction, username: str):
         result = f"⚠️ Error checking shadowban: {str(e)}"
     await interaction.followup.send(content=result)
 
-# Slash command: Pick Reply
-@bot.tree.command(name="pickreply", description="Pick a reply from an X post")
-async def pickreply(interaction: discord.Interaction, post_url: str):
-    await interaction.response.defer(thinking=True)
-    try:
-        result = await pick_reply(post_url)
-    except Exception as e:
-        result = f"⚠️ Error picking a reply: {str(e)}"
-    await interaction.followup.send(content=result)
-
 # Shadowban checking function
 async def check_shadowban(username):
     base_url = "https://x.com"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36"
+    search_url = f"{base_url}/search?q=from%3A{username}&src=typed_query"
+    suggestion_url = f"{base_url}/search?q={username[:5]}&src=typed_query"
+
+    result = {
+        "account_exists": False,
+        "suggestion_ban": None,
+        "search_ban": None,
+        "thread_ban": None,
+        "reply_deboosting": None,
     }
-    timeout = httpx.Timeout(10.0)
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
-        # 1. Check if user exists
-        profile_url = f"{base_url}/{username}"
-        response = await client.get(profile_url)
-        if response.status_code == 404:
-            return f"❌ @{username} does not exist."
-        if response.status_code != 200:
-            return f"⚠️ Couldn't verify user existence (Status code {response.status_code})."
+    timeout = 15000  # 15 seconds max timeout for each page load
 
-        # 2. Search Suggestion Ban Check
-        partial_name = username[:6]  # take first few letters
-        suggestion_url = f"{base_url}/search?q={partial_name}&src=typed_query"
-        response = await client.get(suggestion_url)
-        html = response.text
-        if f"@{username}" in html:
-            suggestion_ban = False
-        else:
-            suggestion_ban = True
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
 
-        # 3. Search Ban Check
-        search_url = f"{base_url}/search?q=from%3A{username}&src=typed_query"
-        response = await client.get(search_url)
-        html = response.text
-        if "No results for" in html or "Something went wrong" in html:
-            search_ban = True
-        else:
-            search_ban = False
-
-        # 4. Ghost/Thread Ban Check
-        response = await client.get(profile_url)
-        html = response.text
-        soup = BeautifulSoup(html, "html.parser")
-
-        tweet_links = []
-        for a_tag in soup.find_all('a', href=True):
-            href = a_tag['href']
-            if f"/{username}/status/" in href and "/photo/" not in href:
-                tweet_links.append(href)
-
-        if not tweet_links:
-            thread_ban_result = "🚫 Unable to find tweets to check thread ban."
-            thread_ban = True
-        else:
-            tweet_url = base_url + tweet_links[0]
-            response = await client.get(tweet_url)
-            tweet_html = response.text
-
-            if "This Tweet is unavailable" in tweet_html:
-                thread_ban = True
+        try:
+            # 1. Check if account exists
+            await page.goto(f"{base_url}/{username}", timeout=timeout)
+            if "Sorry, that page doesn’t exist!" in await page.content():
+                await browser.close()
+                return f"❌ @{username} does not exist."
             else:
-                thread_ban = False
+                result["account_exists"] = True
 
-        # 5. Reply Deboosting Check (basic version)
-        if tweet_links:
-            reply_page_url = base_url + tweet_links[0]
-            response = await client.get(reply_page_url)
-            reply_html = response.text
-            if "Show more replies" in reply_html:
-                reply_deboosting = True
+            # 2. Check Search Suggestion Ban
+            await page.goto(suggestion_url, timeout=timeout)
+            suggestion_html = await page.content()
+            if f"@{username}" in suggestion_html:
+                result["suggestion_ban"] = False
             else:
-                reply_deboosting = False
-        else:
-            reply_deboosting = True  # If no tweets, assume risky
+                result["suggestion_ban"] = True
 
-    # Assemble full result
-    result = (
-        f"🔎 **Shadowban Check for @{username}:**\n\n"
-        f"👤 Account Exists: ✅\n"
-        f"🔍 Search Suggestion Ban: {'🚫 Yes' if suggestion_ban else '✅ No'}\n"
-        f"🔎 Search Ban: {'🚫 Yes' if search_ban else '✅ No'}\n"
-        f"🧵 Ghost/Thread Ban: {'🚫 Yes' if thread_ban else '✅ No'}\n"
-        f"💬 Reply Deboosting: {'🚫 Yes' if reply_deboosting else '✅ No'}\n"
-    )
-    return result
+            # 3. Check Search Ban
+            await page.goto(search_url, timeout=timeout)
+            search_html = await page.content()
+            if "No results for" in search_html or "Something went wrong" in search_html:
+                result["search_ban"] = True
+            else:
+                result["search_ban"] = False
 
-# Pick a random reply function
-async def pick_reply(post_url):
-    tweet_id = post_url.split('/')[-1]
-    nitter_url = f"https://nitter.net/i/web/status/{tweet_id}"
+            # 4. Check Ghost/Thread Ban
+            await page.goto(f"{base_url}/{username}", timeout=timeout)
+            tweets = await page.query_selector_all("article")
+            if not tweets:
+                result["thread_ban"] = True
+            else:
+                result["thread_ban"] = False
 
-    timeout = httpx.Timeout(10.0)
+            # 5. Check Reply Deboosting (basic)
+            if tweets:
+                await tweets[0].click()
+                await page.wait_for_timeout(2000)
+                reply_page_html = await page.content()
+                if "Show more replies" in reply_page_html:
+                    result["reply_deboosting"] = True
+                else:
+                    result["reply_deboosting"] = False
+            else:
+                result["reply_deboosting"] = None  # Couldn't test
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        response = await client.get(nitter_url)
-        html = response.text
-        soup = BeautifulSoup(html, "html.parser")
+        except Exception as e:
+            await browser.close()
+            raise e
 
-        replies = soup.find_all("div", class_="reply")
-        if not replies:
-            return "No replies found."
+        await browser.close()
 
-        reply_texts = [reply.text.strip() for reply in replies]
-        picked = random.choice(reply_texts)
-        return f"🎯 Random picked reply:\n\n{picked}"
+    # Build the output
+    msg = f"🔎 **Shadowban Check for @{username}:**\n\n"
+    msg += f"👤 Account Exists: ✅\n"
+    msg += f"🔍 Search Suggestion Ban: {'🚫 Yes' if result['suggestion_ban'] else '✅ No'}\n"
+    msg += f"🔎 Search Ban: {'🚫 Yes' if result['search_ban'] else '✅ No'}\n"
+    msg += f"🧵 Ghost/Thread Ban: {'🚫 Yes' if result['thread_ban'] else '✅ No'}\n"
+    if result["reply_deboosting"] is not None:
+        msg += f"💬 Reply Deboosting: {'🚫 Yes' if result['reply_deboosting'] else '✅ No'}\n"
+    else:
+        msg += f"💬 Reply Deboosting: ⚠️ Could not test\n"
+
+    return msg
 
 # Run the bot
 bot.run(os.getenv("DISCORD_TOKEN"))
