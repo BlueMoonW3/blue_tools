@@ -22,17 +22,22 @@ async def on_ready():
 # Slash command: Shadowban Checker
 @bot.tree.command(name="shadowban", description="Check if an X account is shadowbanned")
 async def shadowban(interaction: discord.Interaction, username: str):
-    await interaction.response.defer()
-    await interaction.followup.send("🔎 Checking shadowban status... (this may take a few seconds)")
-    result = await check_shadowban(username)
-    await interaction.followup.send(result)
+    await interaction.response.defer(thinking=True)  # Tell Discord we're working
+    try:
+        result = await check_shadowban(username)
+    except Exception as e:
+        result = f"⚠️ Error checking shadowban: {str(e)}"
+    await interaction.followup.send(content=result)  # Reply when done
 
 # Slash command: Pick Reply
 @bot.tree.command(name="pickreply", description="Pick a reply from an X post")
 async def pickreply(interaction: discord.Interaction, post_url: str):
-    await interaction.response.defer()
-    result = await pick_reply(post_url)
-    await interaction.followup.send(result)
+    await interaction.response.defer(thinking=True)
+    try:
+        result = await pick_reply(post_url)
+    except Exception as e:
+        result = f"⚠️ Error picking a reply: {str(e)}"
+    await interaction.followup.send(content=result)
 
 # Function to check shadowban status
 async def check_shadowban(username):
@@ -40,13 +45,16 @@ async def check_shadowban(username):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36"
     }
+    timeout = aiohttp.ClientTimeout(total=10)  # 10-second timeout for requests
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         # 1. Check if user exists
         profile_url = f"{base_url}/{username}"
         async with session.get(profile_url) as response:
             if response.status == 404:
                 return f"❌ @{username} does not exist."
+            if response.status != 200:
+                return f"⚠️ Couldn't verify user existence (Status code {response.status})."
 
         # 2. Check Search Ban
         search_url = f"{base_url}/search?q=from%3A{username}&src=typed_query"
@@ -69,49 +77,45 @@ async def check_shadowban(username):
                     tweet_links.append(href)
 
             if not tweet_links:
-                return f"✅ @{username} exists.\n🚫 Unable to find tweets to check thread ban."
-
-            # Pick the first tweet we find
-            tweet_url = base_url + tweet_links[0]
-
-        # Visit the tweet page
-        async with session.get(tweet_url) as response:
-            html = await response.text()
-
-            if "This Tweet is unavailable" in html:
-                thread_ban = True
+                thread_ban_result = "🚫 Unable to find tweets to check thread ban."
             else:
-                thread_ban = False
+                tweet_url = base_url + tweet_links[0]
+                async with session.get(tweet_url) as response:
+                    html = await response.text()
 
-        # Final Result
-        result = f"**Shadowban Check for @{username}:**\n"
-        result += f"👤 User Exists: ✅\n"
-        result += f"🔍 Search Ban: {'🚫 Yes' if search_ban else '✅ No'}\n"
-        result += f"🧵 Thread Ban: {'🚫 Likely' if thread_ban else '✅ No evidence'}\n"
+                    if "This Tweet is unavailable" in html:
+                        thread_ban_result = "🚫 Likely Thread Banned"
+                    else:
+                        thread_ban_result = "✅ No evidence of Thread Ban"
 
-        return result
+    # Final nicely formatted result
+    result = (
+        f"🔎 **Shadowban Check for @{username}:**\n\n"
+        f"👤 User Exists: ✅\n"
+        f"🔍 Search Ban: {'🚫 Yes' if search_ban else '✅ No'}\n"
+        f"🧵 Thread Ban: {thread_ban_result}\n"
+    )
+    return result
 
 # Function to pick a random reply
 async def pick_reply(post_url):
-    try:
-        tweet_id = post_url.split('/')[-1]
-        nitter_url = f"https://nitter.net/i/web/status/{tweet_id}"
+    tweet_id = post_url.split('/')[-1]
+    nitter_url = f"https://nitter.net/i/web/status/{tweet_id}"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(nitter_url) as response:
-                html = await response.text()
-                soup = BeautifulSoup(html, "html.parser")
+    timeout = aiohttp.ClientTimeout(total=10)
 
-                replies = soup.find_all("div", class_="reply")
-                if not replies:
-                    return "No replies found."
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(nitter_url) as response:
+            html = await response.text()
+            soup = BeautifulSoup(html, "html.parser")
 
-                reply_texts = [reply.text.strip() for reply in replies]
-                picked = random.choice(reply_texts)
-                return f"Random picked reply:\n{picked}"
+            replies = soup.find_all("div", class_="reply")
+            if not replies:
+                return "No replies found."
 
-    except Exception as e:
-        return f"Error parsing the post: {str(e)}"
+            reply_texts = [reply.text.strip() for reply in replies]
+            picked = random.choice(reply_texts)
+            return f"🎯 Random picked reply:\n\n{picked}"
 
 # Run the bot
 bot.run(os.getenv("DISCORD_TOKEN"))
