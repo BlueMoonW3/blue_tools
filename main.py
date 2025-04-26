@@ -6,7 +6,7 @@ import os
 import random
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables (for local testing)
 load_dotenv()
 
 # Initialize bot
@@ -23,6 +23,7 @@ async def on_ready():
 @bot.tree.command(name="shadowban", description="Check if an X account is shadowbanned")
 async def shadowban(interaction: discord.Interaction, username: str):
     await interaction.response.defer()
+    await interaction.followup.send("🔎 Checking shadowban status... (this may take a few seconds)")
     result = await check_shadowban(username)
     await interaction.followup.send(result)
 
@@ -35,22 +36,60 @@ async def pickreply(interaction: discord.Interaction, post_url: str):
 
 # Function to check shadowban status
 async def check_shadowban(username):
-    url = f"https://shadowban.eu/.well-known/shadowban?screen_name={username}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                suspended = data.get('suspended')
-                ghost_ban = data.get('ghost_ban')
-                search_ban = data.get('search_ban')
+    base_url = "https://x.com"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36"
+    }
 
-                msg = f"**@{username} Shadowban Status:**\n"
-                msg += f"Suspended: {'✅' if suspended else '❌'}\n"
-                msg += f"Ghost Ban: {'✅' if ghost_ban else '❌'}\n"
-                msg += f"Search Ban: {'✅' if search_ban else '❌'}\n"
-                return msg
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # 1. Check if user exists
+        profile_url = f"{base_url}/{username}"
+        async with session.get(profile_url) as response:
+            if response.status == 404:
+                return f"❌ @{username} does not exist."
+
+        # 2. Check Search Ban
+        search_url = f"{base_url}/search?q=from%3A{username}&src=typed_query"
+        async with session.get(search_url) as response:
+            html = await response.text()
+            if "No results for" in html or "Something went wrong" in html:
+                search_ban = True
             else:
-                return "Error fetching shadowban data."
+                search_ban = False
+
+        # 3. Basic Thread Ban Detection
+        async with session.get(profile_url) as response:
+            html = await response.text()
+            soup = BeautifulSoup(html, "html.parser")
+
+            tweet_links = []
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                if f"/{username}/status/" in href and "/photo/" not in href:
+                    tweet_links.append(href)
+
+            if not tweet_links:
+                return f"✅ @{username} exists.\n🚫 Unable to find tweets to check thread ban."
+
+            # Pick the first tweet we find
+            tweet_url = base_url + tweet_links[0]
+
+        # Visit the tweet page
+        async with session.get(tweet_url) as response:
+            html = await response.text()
+
+            if "This Tweet is unavailable" in html:
+                thread_ban = True
+            else:
+                thread_ban = False
+
+        # Final Result
+        result = f"**Shadowban Check for @{username}:**\n"
+        result += f"👤 User Exists: ✅\n"
+        result += f"🔍 Search Ban: {'🚫 Yes' if search_ban else '✅ No'}\n"
+        result += f"🧵 Thread Ban: {'🚫 Likely' if thread_ban else '✅ No evidence'}\n"
+
+        return result
 
 # Function to pick a random reply
 async def pick_reply(post_url):
