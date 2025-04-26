@@ -39,7 +39,7 @@ async def pickreply(interaction: discord.Interaction, post_url: str):
         result = f"⚠️ Error picking a reply: {str(e)}"
     await interaction.followup.send(content=result)
 
-# Function to check shadowban status
+# Shadowban checking function
 async def check_shadowban(username):
     base_url = "https://x.com"
     headers = {
@@ -56,7 +56,17 @@ async def check_shadowban(username):
         if response.status_code != 200:
             return f"⚠️ Couldn't verify user existence (Status code {response.status_code})."
 
-        # 2. Check Search Ban
+        # 2. Search Suggestion Ban Check
+        partial_name = username[:6]  # take first few letters
+        suggestion_url = f"{base_url}/search?q={partial_name}&src=typed_query"
+        response = await client.get(suggestion_url)
+        html = response.text
+        if f"@{username}" in html:
+            suggestion_ban = False
+        else:
+            suggestion_ban = True
+
+        # 3. Search Ban Check
         search_url = f"{base_url}/search?q=from%3A{username}&src=typed_query"
         response = await client.get(search_url)
         html = response.text
@@ -65,7 +75,7 @@ async def check_shadowban(username):
         else:
             search_ban = False
 
-        # 3. Basic Thread Ban Detection
+        # 4. Ghost/Thread Ban Check
         response = await client.get(profile_url)
         html = response.text
         soup = BeautifulSoup(html, "html.parser")
@@ -78,26 +88,41 @@ async def check_shadowban(username):
 
         if not tweet_links:
             thread_ban_result = "🚫 Unable to find tweets to check thread ban."
+            thread_ban = True
         else:
             tweet_url = base_url + tweet_links[0]
             response = await client.get(tweet_url)
-            html = response.text
+            tweet_html = response.text
 
-            if "This Tweet is unavailable" in html:
-                thread_ban_result = "🚫 Likely Thread Banned"
+            if "This Tweet is unavailable" in tweet_html:
+                thread_ban = True
             else:
-                thread_ban_result = "✅ No evidence of Thread Ban"
+                thread_ban = False
 
-    # Final formatted result
+        # 5. Reply Deboosting Check (basic version)
+        if tweet_links:
+            reply_page_url = base_url + tweet_links[0]
+            response = await client.get(reply_page_url)
+            reply_html = response.text
+            if "Show more replies" in reply_html:
+                reply_deboosting = True
+            else:
+                reply_deboosting = False
+        else:
+            reply_deboosting = True  # If no tweets, assume risky
+
+    # Assemble full result
     result = (
         f"🔎 **Shadowban Check for @{username}:**\n\n"
-        f"👤 User Exists: ✅\n"
-        f"🔍 Search Ban: {'🚫 Yes' if search_ban else '✅ No'}\n"
-        f"🧵 Thread Ban: {thread_ban_result}\n"
+        f"👤 Account Exists: ✅\n"
+        f"🔍 Search Suggestion Ban: {'🚫 Yes' if suggestion_ban else '✅ No'}\n"
+        f"🔎 Search Ban: {'🚫 Yes' if search_ban else '✅ No'}\n"
+        f"🧵 Ghost/Thread Ban: {'🚫 Yes' if thread_ban else '✅ No'}\n"
+        f"💬 Reply Deboosting: {'🚫 Yes' if reply_deboosting else '✅ No'}\n"
     )
     return result
 
-# Function to pick a random reply
+# Pick a random reply function
 async def pick_reply(post_url):
     tweet_id = post_url.split('/')[-1]
     nitter_url = f"https://nitter.net/i/web/status/{tweet_id}"
